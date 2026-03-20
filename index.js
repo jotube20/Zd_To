@@ -1,9 +1,34 @@
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const mongoose = require('mongoose');
 const express = require('express');
-const { User, BotConfig } = require('./Schema');
 require('dotenv').config();
 
+// ==========================================
+// 1. إعدادات قاعدة البيانات (Schemas)
+// ==========================================
+const UserSchema = new mongoose.Schema({
+    userId: { type: String, required: true, unique: true },
+    balance: { type: Number, default: 0 },
+    inventory: { type: Object, default: {} },
+    stocks: { type: Object, default: { apple: 0, starbucks: 0, google: 0, microsoft: 0, mcdonalds: 0, tesla: 0 } },
+    cooldowns: { type: Object, default: {} },
+    loan: { amount: { type: Number, default: 0 }, takenAt: { type: Number, default: 0 } },
+    isJailed: { type: Boolean, default: false }
+});
+
+const BotConfigSchema = new mongoose.Schema({
+    botId: { type: String, default: 'main' },
+    owners: { type: Array, default: [] }, // ضيف أيديهات الأونرز هنا لو حابب
+    stockPrices: { type: Object, default: { apple: 920395, starbucks: 1255263, google: 154688, microsoft: 2748133, mcdonalds: 1401874, tesla: 1214967 } },
+    stockTrend: { type: Number, default: 0 }
+});
+
+const User = mongoose.model('User', UserSchema);
+const BotConfig = mongoose.model('BotConfig', BotConfigSchema);
+
+// ==========================================
+// 2. إعدادات البوت والسيرفر
+// ==========================================
 const app = express();
 app.get('/', (req, res) => res.send('Paris Bank is Active!'));
 app.listen(process.env.PORT || 3000, () => console.log('Web server running...'));
@@ -12,7 +37,10 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// دالة تحويل المبالغ (k, m, b, t)
+// ==========================================
+// 3. الدوال المساعدة (Helpers الفاخرة)
+// ==========================================
+// دالة تحويل الحروف (k, m, b, t) لأرقام
 function parseAmount(amountStr) {
     if (!amountStr) return null;
     let multiplier = 1;
@@ -25,7 +53,7 @@ function parseAmount(amountStr) {
     return isNaN(num) ? null : Math.floor(num * multiplier);
 }
 
-// دالة تنسيق الأرقام
+// دالة تنسيق الأرقام عشان تظهر بشكل احترافي
 function formatNumber(num) {
     if (num >= 1000000000) return (num / 1000000000).toFixed(1) + 'b';
     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'm';
@@ -33,195 +61,346 @@ function formatNumber(num) {
     return num.toString();
 }
 
+// دالة إرسال الإيمبدز (عشان كل رسايل البوت تبقى فخمة)
+function sendEmbed(message, desc, color = '#2b2d31') {
+    const embed = new EmbedBuilder().setDescription(desc).setColor(color);
+    return message.reply({ embeds: [embed] });
+}
+
+// دالة رسالة الوقت (بالثواني والدقايق زي الصورة)
+function getCooldownText(ms) {
+    const minutes = Math.floor(ms / 60000);
+    const seconds = Math.floor((ms % 60000) / 1000);
+    return `توك لاعب تعال بعد:\n> ${minutes} minutes, ${seconds} seconds ⏳`;
+}
+
+// قائمة المتجر
 const shopItems = {
     'جوال': 10000, 'بيسي': 20000, 'سيارة': 100000, 'قصر': 1200000,
     'طيارة': 3000000, 'شركة': 7000000, 'مطعم': 10000000, 'يخت': 25000000,
     'قطار': 30000000, 'جزيرة': 50000000, 'قرية': 150000000, 'قلعة': 200000000, 'دولة': 500000000
 };
 
+// ==========================================
+// 4. تحديث أسعار البورصة كل 5 دقائق
+// ==========================================
+setInterval(async () => {
+    let config = await BotConfig.findOne({ botId: 'main' });
+    if (!config) return;
+    config.stockTrend += 1;
+    const isBoom = config.stockTrend >= 3; // بترفع جامد كل 3 مرات
+    if (isBoom) config.stockTrend = 0;
+    for (let key in config.stockPrices) {
+        let currentPrice = config.stockPrices[key];
+        currentPrice += isBoom ? Math.floor(currentPrice * (Math.random() * 0.5 + 0.1)) : -Math.floor(currentPrice * (Math.random() * 0.1 + 0.01));
+        config.stockPrices[key] = Math.max(1000, currentPrice);
+    }
+    config.markModified('stockPrices');
+    await config.save();
+}, 5 * 60 * 1000);
+
 client.on('ready', () => {
-    console.log(`Logged in as ${client.user.tag}!`);
+    console.log(`Logged in as ${client.user.tag}! Paris Bank is Ready 🔥`);
 });
 
+// ==========================================
+// 5. هندسة الأوامر الأساسية
+// ==========================================
 client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
     const args = message.content.trim().split(/ +/);
     const command = args[0];
 
+    // قائمة الأوامر المعترف بها عشان البوت ميردش على الدردشة العادية ويقول "مسجون"
+    const validCommands = ['استثمار','بخشيش','تحويل','تداول','راتب','روليت','سلوت','صاروخ','طاولة','لعبه','لعبة','زر','كراش','ماين','قرض','ضربة','ارقام','مقاولة','اكس-او','اكس','مخاطرة','سوبر','سباق','ابراج','ذاكرة','ايموجي','كنز','رصيد','فلوس','متجر','ممتلكاتي','شراء','بيع','اسعار','اسهمي','سجني','تسديد','نهب','اوامر','#اوامر','وقت','اضافة','ازالة','تصفية'];
+    if (!validCommands.includes(command)) return;
+
     let botConfig = await BotConfig.findOne({ botId: 'main' }) || await BotConfig.create({ botId: 'main' });
     let userData = await User.findOne({ userId: message.author.id }) || await User.create({ userId: message.author.id });
-
+    const isOwner = botConfig.owners.includes(message.author.id);
     const now = Date.now();
 
-    // ==========================================
-    // نظام فحص السجن التلقائي (Jail System)
-    // ==========================================
+    // ------------------------------------------
+    // أوامر الأونر (VIP تتخطى أي سجن)
+    // ------------------------------------------
+    if (isOwner) {
+        if (command === 'اضافة' && args[1] === 'اونر') {
+            const target = message.mentions.users.first();
+            if (!target) return sendEmbed(message, 'منشن الشخص!', '#e74c3c');
+            if (!botConfig.owners.includes(target.id)) {
+                botConfig.owners.push(target.id); await botConfig.save();
+                return sendEmbed(message, `تم إضافة ${target} للأونرات ✅`, '#2ecc71');
+            }
+            return;
+        }
+        if (command === 'ازالة' && args[1] === 'اونر') {
+            const target = message.mentions.users.first();
+            if (target) {
+                botConfig.owners = botConfig.owners.filter(id => id !== target.id); await botConfig.save();
+                return sendEmbed(message, `تم إزالة ${target} من الأونرات ❌`, '#e74c3c');
+            }
+            return;
+        }
+        if (command === 'تصفية') {
+            await User.deleteMany({});
+            return sendEmbed(message, 'تم تصفية فلوس وممتلكات كل الأعضاء ⚠️🔥', '#e74c3c');
+        }
+    }
+
+    // ------------------------------------------
+    // نظام السجن الاحترافي
+    // ------------------------------------------
     if (userData.loan && userData.loan.amount > 0 && !userData.isJailed) {
-        // لو عدى 3 ساعات (10800000 مللي ثانية)
-        if (now - userData.loan.takenAt >= 10800000) {
+        if (now - userData.loan.takenAt >= 10800000) { // 3 ساعات = سجن
             userData.isJailed = true;
             await userData.save();
         }
     }
 
-    if (userData.isJailed && !['تسديد', 'سجني', 'لعبه'].includes(command)) {
-        return message.reply('🚨 **أنت مسجون حالياً بسبب عدم تسديد القرض!**\nلا يمكنك استخدام أي أمر سوى `تسديد` أو `سجني` أو `لعبه`.');
+    // المسموح ليهم وقت السجن
+    const allowedWhileJailed = ['تسديد', 'سجني', 'لعبه', 'لعبة', 'تداول', 'استثمار', 'مخاطرة', 'سوبر'];
+    if (userData.isJailed && !allowedWhileJailed.includes(command) && !isOwner) {
+        return sendEmbed(message, '🚨 **أنت مسجون حالياً بسبب عدم تسديد القرض!**\nلا يمكنك استخدام أي أمر سوى `تسديد` أو `سجني` أو `لعبه` أو أوامر `التداول` و `الاستثمار` لتسديد دينك.', '#e74c3c');
     }
 
-    // ==========================================
-    // الاقتصاد الأساسي
-    // ==========================================
+    // دالة فحص الكول داون الموحدة (عشان منكررش الكود وتطلع زي الصورة)
+    const checkCooldown = async (key, minutes) => {
+        const cooldownAmount = minutes * 60 * 1000;
+        const lastUsed = userData.cooldowns?.[key] || 0;
+        if (now - lastUsed < cooldownAmount) {
+            const timeLeft = cooldownAmount - (now - lastUsed);
+            message.reply({ content: getCooldownText(timeLeft) });
+            return true;
+        }
+        userData.cooldowns = { ...userData.cooldowns, [key]: now };
+        userData.markModified('cooldowns');
+        return false;
+    };
+
+    // ------------------------------------------
+    // الاقتصاد الأساسي (راتب، بخشيش، تحويل، نهب)
+    // ------------------------------------------
     if (command === 'رصيد' || command === 'فلوس') {
         const target = message.mentions.users.first() || message.author;
         let targetData = await User.findOne({ userId: target.id }) || await User.create({ userId: target.id });
-        const embed = new EmbedBuilder().setAuthor({ name: 'PariS community bank', iconURL: message.guild.iconURL() })
-            .setTitle('مجموع فلوسك هو:').setDescription(`**${formatNumber(targetData.balance)} | ${targetData.balance}$**`)
-            .setColor('#2b2d31').setFooter({ text: 'لعرض الأوامر #اوامر' });
-        return message.reply({ embeds: [embed] });
+        return sendEmbed(message, `مجموع فلوسك هو:\n**${formatNumber(targetData.balance)} | ${targetData.balance}$**`);
     }
 
     if (command === 'تحويل') {
-        const target = message.mentions.users.first(); const amount = parseAmount(args[2]);
-        if (!target || !amount || amount <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nتحويل @منشن (المبلغ)');
-        if (amount > 500000000) return message.reply('الحد الأقصى للتحويل في المرة الواحدة هو **500m**!');
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
+        if (await checkCooldown('transfer', 2.5)) return; // دقيقتين ونص
+        const target = message.mentions.users.first();
+        const amount = parseAmount(args[2]);
+        if (!target || !amount || amount <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nتحويل @منشن (المبلغ)', '#e74c3c');
+        if (amount > 500000000) return sendEmbed(message, 'الحد الأقصى للتحويل في المرة الواحدة هو **500m**!', '#e74c3c');
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
+
         let targetData = await User.findOne({ userId: target.id }) || await User.create({ userId: target.id });
         userData.balance -= amount; targetData.balance += amount;
-        await userData.save(); await targetData.save(); return message.reply(`تم تحويل **${formatNumber(amount)}$** إلى ${target} ✅`);
+        await userData.save(); await targetData.save();
+        return sendEmbed(message, `تم تحويل **${formatNumber(amount)}$** إلى ${target} ✅`, '#2ecc71');
     }
 
-    // ==========================================
-    // المتجر والممتلكات والمقاولة
-    // ==========================================
-    if (command === 'متجر' || command === '#متجر') {
-        let shopText = ''; for (let item in shopItems) shopText += `**${item}** : ${formatNumber(shopItems[item])}$\n`;
-        return message.reply({ embeds: [new EmbedBuilder().setTitle('🛒 المتجر').setDescription(shopText).setColor('#f1c40f')] });
+    if (command === 'راتب') {
+        if (await checkCooldown('daily', 7)) return; // 7 دقايق
+        const amount = Math.floor(Math.random() * (100000 - 1000 + 1)) + 1000;
+        userData.balance += amount; await userData.save();
+        return sendEmbed(message, `تم سحب الراتب ${formatNumber(amount)}$ , رصيدك الحالي ${formatNumber(userData.balance)}$`, '#2ecc71');
     }
 
-    if (command === 'ممتلكاتي') {
-        const target = message.mentions.users.first() || message.author;
-        let targetData = await User.findOne({ userId: target.id }) || await User.create({ userId: target.id });
-        let invText = ''; for (let item in targetData.inventory) invText += `**${item}** : ${targetData.inventory[item]}\n`;
-        return message.reply({ embeds: [new EmbedBuilder().setTitle(`🎒 ممتلكات ${target.username}`).setDescription(invText || 'مفلس ومعندوش أي ممتلكات 😂💔').setColor('#3498db')] });
+    if (command === 'بخشيش') {
+        if (await checkCooldown('tip', 10)) return; // 10 دقايق
+        const amount = Math.floor(Math.random() * 100000) + 1;
+        userData.balance += amount; await userData.save();
+        return sendEmbed(message, `ما نقص مال من صدقة خد يا فقير ${formatNumber(amount)}$`, '#2ecc71');
     }
 
-    if (command === '#شراء') {
-        const itemName = args.slice(1).join(' '); const price = shopItems[itemName];
-        if (!price) return message.reply('المنتج ده مش في المتجر!');
-        if (userData.balance < price) return message.reply('رصيدك غير كافي!');
-        userData.balance -= price; userData.inventory[itemName] = (userData.inventory[itemName] || 0) + 1;
-        userData.markModified('inventory'); await userData.save(); return message.reply(`تم شراء **${itemName}** ✅`);
-    }
+    if (command === 'نهب') {
+        if (await checkCooldown('rob', 15)) return; // 15 دقيقة
+        const target = message.mentions.users.first();
+        if (!target) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nنهب @منشن', '#e74c3c');
+        if (target.id === message.author.id) return sendEmbed(message, 'هتسرق نفسك؟!', '#e74c3c');
 
-    if (command === 'مقاولة') {
-        const itemName = args[1]; const count = parseInt(args[2]);
-        if (!itemName || isNaN(count) || count <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nمقاولة (الاسم) (العدد)');
-        
-        const cooldownTime = 5 * 60 * 1000; // 5 دقايق
-        const lastUsed = userData.cooldowns?.makawla || 0;
-        if (now - lastUsed < cooldownTime) return message.reply(`انتظر **${Math.ceil((cooldownTime - (now - lastUsed)) / 60000)}** دقيقة لاستخدام المقاولة مرة أخرى ⏳`);
+        let targetData = await User.findOne({ userId: target.id });
+        if (!targetData || targetData.balance < 3000) return sendEmbed(message, 'الشخص ده معهوش فلوس تتسرق!', '#e74c3c');
 
-        if (!userData.inventory[itemName] || userData.inventory[itemName] < count) return message.reply(`انت مش معاك العدد ده من ${itemName}!`);
-        
-        userData.inventory[itemName] -= count; 
-        if (userData.inventory[itemName] === 0) delete userData.inventory[itemName];
-        
-        userData.cooldowns = { ...userData.cooldowns, makawla: now };
-        userData.markModified('inventory'); userData.markModified('cooldowns');
-        
-        if (Math.random() < 0.5) { 
-            const winAmount = (shopItems[itemName] * count) * 2;
-            userData.balance += winAmount; await userData.save(); 
-            return message.reply(`مبروك! المقاولة نجحت 🤑\nالمكسب: **${formatNumber(winAmount)}$**`); 
-        } else { 
-            await userData.save(); return message.reply(`للأسف المقاولة فشلت وطارت ممتلكاتك 💔`); 
-        }
+        const stolen = Math.floor(Math.random() * (30000 - 1000 + 1)) + 1000;
+        const actual = Math.min(targetData.balance, stolen);
+
+        userData.balance += actual; targetData.balance -= actual;
+        await userData.save(); await targetData.save();
+        return sendEmbed(message, `تم نهب **${formatNumber(actual)}$** من ${target} 🥷`, '#2ecc71');
     }
     // ==========================================
-    // القروض، السجن، والتسديد
+    // 6. نظام القروض والسجن
     // ==========================================
     if (command === 'قرض') {
-        const cd = 15 * 60 * 1000; // 15 دقيقة
-        const lastLoan = userData.cooldowns?.loan || 0;
-        if (now - lastLoan < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastLoan)) / 60000)}** دقيقة لطلب قرض جديد ⏳`);
+        if (await checkCooldown('loan', 15)) return; // 15 دقيقة
+        if (userData.loan && userData.loan.amount > 0) return sendEmbed(message, 'أنت واخد قرض بالفعل ولازم تسدده الأول!', '#e74c3c');
         
-        if (userData.loan && userData.loan.amount > 0) return message.reply('أنت واخد قرض بالفعل ولازم تسدده الأول!');
-
-        // مبلغ عشوائي بين 300k و 500k
-        const amount = Math.floor(Math.random() * (500000 - 300000 + 1)) + 300000; 
-        
+        const amount = Math.floor(Math.random() * (500000 - 300000 + 1)) + 300000;
         userData.balance += amount;
         userData.loan = { amount: amount, takenAt: now };
         userData.isJailed = false;
-        userData.cooldowns = { ...userData.cooldowns, loan: now };
-        userData.markModified('cooldowns');
         await userData.save();
-        
-        const embed = new EmbedBuilder()
-            .setTitle('🏦 بنك باريس - القروض')
-            .setDescription(`تم إيداع **${formatNumber(amount)}$** في رصيدك كقرض.\n\n⚠️ **تنبيه هام:** معاك 3 ساعات بس لتسديد القرض ده، وإلا هيتم سجنك ومش هتقدر تستخدم أي أوامر تانية باستثناء الألعاب المسموحة!`)
-            .setColor('#e74c3c');
-        return message.reply({ embeds: [embed] });
+        return sendEmbed(message, `🏦 تم إيداع **${formatNumber(amount)}$** في رصيدك كقرض.\n\n⚠️ **تنبيه هام:** معاك 3 ساعات بس لتسديد القرض ده، وإلا هيتم سجنك ومش هتقدر تستخدم أي أوامر تانية باستثناء الألعاب المسموحة!`, '#f1c40f');
     }
 
     if (command === 'سجني') {
-        if (!userData.loan || userData.loan.amount === 0) {
-            return message.reply('أنت لست مديوناً للبنك، سجلك نظيف! 😇');
-        }
-
-        const timeLeft = 10800000 - (now - userData.loan.takenAt); // 3 ساعات
+        if (!userData.loan || userData.loan.amount === 0) return sendEmbed(message, 'أنت لست مديوناً للبنك، سجلك نظيف! 😇', '#2ecc71');
         
+        const timeLeft = 10800000 - (now - userData.loan.takenAt); // 3 ساعات
         if (timeLeft <= 0 || userData.isJailed) {
-            return message.reply(`🚨 **أنت مسجون بالفعل!**\nمبلغ القرض المطلوب سداده: **${formatNumber(userData.loan.amount)}$**\nاستخدم أمر \`تسديد\` لفك سجنك.`);
+            return sendEmbed(message, `🚨 **أنت مسجون بالفعل!**\nمبلغ القرض المطلوب سداده: **${formatNumber(userData.loan.amount)}$**\nاستخدم أمر \`تسديد\` لفك سجنك.`, '#e74c3c');
         }
-
+        
         const hours = Math.floor(timeLeft / 3600000);
         const minutes = Math.floor((timeLeft % 3600000) / 60000);
-
-        const embed = new EmbedBuilder()
-            .setTitle('⚖️ حالة السجن والديون')
-            .setDescription(`**مبلغ القرض:** ${formatNumber(userData.loan.amount)}$\n**الوقت المتبقي قبل السجن:** ⏳ ${hours} ساعات و ${minutes} دقائق`)
-            .setColor('#f1c40f');
-        return message.reply({ embeds: [embed] });
+        return sendEmbed(message, `⚖️ **حالة السجن والديون**\n\n**مبلغ القرض:** ${formatNumber(userData.loan.amount)}$\n**الوقت المتبقي قبل السجن:** ⏳ ${hours} ساعات و ${minutes} دقائق`, '#f1c40f');
     }
 
     if (command === 'تسديد') {
         const target = message.mentions.users.first() || message.author;
         let targetData = await User.findOne({ userId: target.id });
-
-        if (!targetData || !targetData.loan || targetData.loan.amount === 0) {
-            return message.reply(target.id === message.author.id ? 'أنت مش واخد قرض عشان تسدده!' : 'الشخص ده مش عليه قروض!');
-        }
-
-        const amountToPay = targetData.loan.amount;
         
-        if (userData.balance < amountToPay) {
-            return message.reply(`رصيدك غير كافي لتسديد القرض! المطلوب: **${formatNumber(amountToPay)}$**`);
+        if (!targetData || !targetData.loan || targetData.loan.amount === 0) {
+            return sendEmbed(message, target.id === message.author.id ? 'أنت مش واخد قرض عشان تسدده!' : 'الشخص ده مش عليه قروض!', '#e74c3c');
         }
-
+        
+        const amountToPay = targetData.loan.amount;
+        if (userData.balance < amountToPay) return sendEmbed(message, `رصيدك غير كافي لتسديد القرض! المطلوب: **${formatNumber(amountToPay)}$**`, '#e74c3c');
+        
+        // الخصم وتصفير السجن والدين فعلياً
         userData.balance -= amountToPay;
         targetData.loan = { amount: 0, takenAt: 0 };
         targetData.isJailed = false;
-        
         await userData.save();
         if (target.id !== message.author.id) await targetData.save();
-
-        return message.reply(`✅ تم تسديد مبلغ **${formatNumber(amountToPay)}$** للبنك ${target.id === message.author.id ? 'وتم فك سجنك (إن كنت مسجون)' : `نيابة عن ${target} وتم فك سجنه`}!`);
+        
+        return sendEmbed(message, `✅ تم تسديد مبلغ **${formatNumber(amountToPay)}$** للبنك ${target.id === message.author.id ? 'وتم فك سجنك (إن كنت مسجون)!' : `نيابة عن ${target} وتم فك سجنه!`}`, '#2ecc71');
     }
 
     // ==========================================
-    // البورصة والأسهم
+    // 7. أمر وقت (البطاريات الأسطورية)
+    // ==========================================
+    if (command === 'وقت') {
+        const getBatt = (key, mins) => {
+            const last = userData.cooldowns?.[key] || 0;
+            const t = mins * 60000;
+            if (now - last >= t) return '🔋';
+            return `🪫 (باقي ${Math.floor((t - (now - last)) / 60000)} د)`;
+        };
+        
+        const timeTxt = `
+**استثمار** ${getBatt('استثمار', 3)}
+**بخشيش** ${getBatt('tip', 10)}
+**تحويل** ${getBatt('transfer', 2.5)}
+**تداول** ${getBatt('تداول', 3)}
+**راتب** ${getBatt('daily', 7)}
+**روليت** ${getBatt('roulette', 7)}
+**سلوت** ${getBatt('slot', 8)}
+**صاروخ** ${getBatt('صاروخ', 4)}
+**طاولة** ${getBatt('طاولة', 3)}
+**لعبه** ${getBatt('game', 1)}
+**زر** ${getBatt('zrr', 2.5)}
+**ماين** ${getBatt('mine', 4)}
+**قرض** ${getBatt('loan', 15)}
+**ضربة جزاء** ${getBatt('pen', 4)}
+**ارقام** ${getBatt('nums', 2.5)}
+**مقاولة** ${getBatt('makawla', 5)}
+**اكس-او** ${getBatt('xo', 2)}
+**مخاطرة** ${getBatt('مخاطرة', 8)}
+**سباق** ${getBatt('race', 3)}
+**ابراج** ${getBatt('towers', 2.5)}
+**ذاكرة** ${getBatt('ذاكرة', 5)}
+**ايموجي** ${getBatt('ايموجي', 3)}
+**كنز** ${getBatt('كنز', 3)}
+**سوبر مخاطرة** ${getBatt('سوبر مخاطرة', 30)}
+`;
+        return sendEmbed(message, `⏳ **أوقات الأوامر الخاصة بك**\n${timeTxt}`, '#3498db');
+    }
+
+    // ==========================================
+    // 8. المتجر والممتلكات والمقاولة
+    // ==========================================
+    if (command === 'متجر') {
+        let shopText = '';
+        for (let item in shopItems) shopText += `**${item}** : ${formatNumber(shopItems[item])}$\n`;
+        return sendEmbed(message, `🛒 **المتجر**\n\n${shopText}`, '#f1c40f');
+    }
+
+    if (command === 'ممتلكاتي') {
+        const target = message.mentions.users.first() || message.author;
+        let targetData = await User.findOne({ userId: target.id }) || await User.create({ userId: target.id });
+        let invText = '';
+        for (let item in targetData.inventory) invText += `**${item}** : ${targetData.inventory[item]}\n`;
+        return sendEmbed(message, `🎒 **ممتلكات ${target.username}**\n\n${invText || 'مفلس ومعندوش أي ممتلكات 😂💔'}`, '#3498db');
+    }
+
+    if (command === 'شراء') {
+        if (args[1] === 'اسهم') {
+            const count = parseInt(args[2]);
+            if (isNaN(count) || count <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nشراء اسهم (العدد)', '#e74c3c');
+            const row = new ActionRowBuilder().addComponents(
+                new StringSelectMenuBuilder().setCustomId(`buy_stock_${count}`).setPlaceholder('اختر الشركة اللي عايز تشتري منها').addOptions([
+                    { label: 'ستاربكس', value: 'starbucks', description: 'الحد الأقصى 350 سهم' },
+                    { label: 'ماكدونالدز', value: 'mcdonalds', description: 'الحد الأقصى 500 سهم' },
+                    { label: 'أبل', value: 'apple', description: 'الحد الأقصى 300 سهم' },
+                    { label: 'جوجل', value: 'google', description: 'الحد الأقصى 400 سهم' },
+                    { label: 'مايكروسوفت', value: 'microsoft', description: 'الحد الأقصى 450 سهم' },
+                    { label: 'تيسلا', value: 'tesla', description: 'الحد الأقصى 400 سهم' }
+                ])
+            );
+            return message.reply({ embeds: [new EmbedBuilder().setDescription(`اختر الشركة اللي عايز تشتري منها **${count}** سهم:`).setColor('#3498db')], components: [row] });
+        } else {
+            const itemName = args.slice(1).join(' ');
+            const price = shopItems[itemName];
+            if (!price) return sendEmbed(message, 'المنتج ده مش في المتجر!', '#e74c3c');
+            if (userData.balance < price) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
+            userData.balance -= price;
+            userData.inventory[itemName] = (userData.inventory[itemName] || 0) + 1;
+            userData.markModified('inventory');
+            await userData.save();
+            return sendEmbed(message, `تم شراء **${itemName}** ✅`, '#2ecc71');
+        }
+    }
+
+    if (command === 'مقاولة') {
+        if (await checkCooldown('makawla', 5)) return; // 5 دقايق
+        const itemName = args[1];
+        const count = parseInt(args[2]);
+        if (!itemName || isNaN(count) || count <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nمقاولة (الاسم) (العدد)', '#e74c3c');
+        if (!userData.inventory[itemName] || userData.inventory[itemName] < count) return sendEmbed(message, `انت مش معاك العدد ده من ${itemName}!`, '#e74c3c');
+        
+        userData.inventory[itemName] -= count;
+        if (userData.inventory[itemName] === 0) delete userData.inventory[itemName];
+        userData.markModified('inventory');
+        
+        if (Math.random() < 0.5) {
+            const winAmount = (shopItems[itemName] * count) * 2;
+            userData.balance += winAmount;
+            await userData.save();
+            return sendEmbed(message, `مبروك! المقاولة نجحت 🤑\nالمكسب: **${formatNumber(winAmount)}$**`, '#2ecc71');
+        } else {
+            await userData.save();
+            return sendEmbed(message, `للأسف المقاولة فشلت وطارت ممتلكاتك 💔`, '#e74c3c');
+        }
+    }
+
+    // ==========================================
+    // 9. البورصة والأسهم (اسعار، اسهمي، بيع)
     // ==========================================
     if (command === 'اسعار') {
         let pricesText = '';
         const names = { apple: 'أبل', starbucks: 'ستاربكس', google: 'جوجل', microsoft: 'مايكروسوفت', mcdonalds: 'ماكدونالدز', tesla: 'تيسلا' };
-        for (let stock in botConfig.stockPrices) pricesText += `**سهم ${names[stock]}**: ${formatNumber(botConfig.stockPrices[stock])}$\n`;
-        const embed = new EmbedBuilder().setTitle('📈 أسعار الأسهم في السوق').setDescription(pricesText).setColor('#2ecc71');
-        return message.reply({ embeds: [embed] });
+        for (let stock in botConfig.stockPrices) {
+            pricesText += `**سهم ${names[stock]}**: ${formatNumber(botConfig.stockPrices[stock])}$\n`;
+        }
+        return sendEmbed(message, `📈 **أسعار الأسهم في السوق**\n\n${pricesText}`, '#2ecc71');
     }
 
     if (command === 'اسهمي') {
-        let stocksText = ''; let totalValue = 0;
+        let stocksText = '';
+        let totalValue = 0;
         const names = { apple: 'أبل', starbucks: 'ستاربكس', google: 'جوجل', microsoft: 'مايكروسوفت', mcdonalds: 'ماكدونالدز', tesla: 'تيسلا' };
         for (let stock in userData.stocks) {
             if (userData.stocks[stock] > 0) {
@@ -231,109 +410,43 @@ client.on('messageCreate', async message => {
         }
         if (stocksText === '') stocksText = 'لا تمتلك أي أسهم حالياً.';
         stocksText += `\n\n**القيمة الإجمالية لأسهمك الآن:** ${formatNumber(totalValue)}$ 💰`;
-        const embed = new EmbedBuilder().setTitle('📊 محفظتك الاستثمارية').setDescription(stocksText).setColor('#9b59b6');
-        return message.reply({ embeds: [embed] });
-    }
-
-    if (command === 'شراء' && args[1] === 'اسهم') {
-        const count = parseInt(args[2]);
-        if (isNaN(count) || count <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nشراء اسهم (العدد)');
-        const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder().setCustomId(`buy_stock_${count}`).setPlaceholder('اختر الشركة اللي عايز تشتري منها').addOptions([
-                { label: 'ستاربكس', value: 'starbucks', description: 'الحد الأقصى 350 سهم' },
-                { label: 'ماكدونالدز', value: 'mcdonalds', description: 'الحد الأقصى 500 سهم' },
-                { label: 'أبل', value: 'apple', description: 'الحد الأقصى 300 سهم' },
-                { label: 'جوجل', value: 'google', description: 'الحد الأقصى 400 سهم' },
-                { label: 'مايكروسوفت', value: 'microsoft', description: 'الحد الأقصى 450 سهم' },
-                { label: 'تيسلا', value: 'tesla', description: 'الحد الأقصى 400 سهم' }
-            ])
-        );
-        return message.reply({ content: `اختر الشركة اللي عايز تشتري منها **${count}** سهم:`, components: [row] });
+        return sendEmbed(message, `📊 **محفظتك الاستثمارية**\n\n${stocksText}`, '#9b59b6');
     }
 
     if (command === 'بيع' && args[1] === 'اسهم') {
-        const company = args[2]; const count = parseInt(args[3]);
+        const company = args[2];
+        const count = parseInt(args[3]);
         const companies = { 'ستاربكس': 'starbucks', 'ماكدونالدز': 'mcdonalds', 'ابل': 'apple', 'أبل': 'apple', 'جوجل': 'google', 'مايكروسوفت': 'microsoft', 'تيسلا': 'tesla' };
-        if (!company || isNaN(count) || count <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nبيع اسهم (اسم الشركة) (العدد)');
+        
+        if (!company || isNaN(count) || count <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nبيع اسهم (اسم الشركة) (العدد)', '#e74c3c');
         const stockKey = companies[company];
-        if (!stockKey) return message.reply('اسم الشركة غلط!');
-        if (!userData.stocks || userData.stocks[stockKey] < count) return message.reply(`انت مش معاك ${count} سهم في ${company}!`);
-        const currentPrice = botConfig.stockPrices[stockKey]; const totalProfit = currentPrice * count;
-        userData.stocks[stockKey] -= count; userData.balance += totalProfit;
-        userData.markModified('stocks'); await userData.save();
-        return message.reply(`تم بيع **${count}** سهم من **${company}** بنجاح ✅\nكسبت: **${formatNumber(totalProfit)}$**`);
+        if (!stockKey) return sendEmbed(message, 'اسم الشركة غلط!', '#e74c3c');
+        if (!userData.stocks || userData.stocks[stockKey] < count) return sendEmbed(message, `انت مش معاك ${count} سهم في ${company}!`, '#e74c3c');
+        
+        const currentPrice = botConfig.stockPrices[stockKey];
+        const totalProfit = currentPrice * count;
+        
+        userData.stocks[stockKey] -= count;
+        userData.balance += totalProfit;
+        userData.markModified('stocks');
+        await userData.save();
+        
+        return sendEmbed(message, `تم بيع **${count}** سهم من **${company}** بنجاح ✅\nكسبت: **${formatNumber(totalProfit)}$**`, '#2ecc71');
     }
     // ==========================================
-    // الراتب، البقشيش (بخشيش)، والنهب
-    // ==========================================
-    if (command === 'راتب') {
-        const cd = 7 * 60 * 1000; // 7 دقايق
-        const lastDaily = userData.cooldowns?.daily || 0;
-        if (now - lastDaily < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastDaily)) / 60000)}** دقيقة ⏳`);
-        
-        const amount = Math.floor(Math.random() * (100000 - 1000 + 1)) + 1000;
-        userData.balance += amount;
-        userData.cooldowns = { ...userData.cooldowns, daily: now };
-        userData.markModified('cooldowns'); await userData.save();
-        return message.reply(`تم سحب الراتب ${formatNumber(amount)}$ , رصيدك الحالي ${formatNumber(userData.balance)}$`);
-    }
-
-    if (command === 'بخشيش') {
-        const cd = 10 * 60 * 1000; // 10 دقايق
-        const lastTip = userData.cooldowns?.tip || 0;
-        if (now - lastTip < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastTip)) / 60000)}** دقيقة ⏳`);
-        
-        const tip = Math.floor(Math.random() * (100000 - 1 + 1)) + 1;
-        userData.balance += tip;
-        userData.cooldowns = { ...userData.cooldowns, tip: now };
-        userData.markModified('cooldowns'); await userData.save();
-        return message.reply(`ما نقص مال من صدقة خد يا فقير ${formatNumber(tip)}$`);
-    }
-
-    if (command === 'نهب') {
-        const cd = 15 * 60 * 1000; // 15 دقيقة
-        const lastRob = userData.cooldowns?.rob || 0;
-        if (now - lastRob < cd) {
-            const left = cd - (now - lastRob);
-            return message.reply(`بس ياسراق ياحرامي تعال بعد:\n⏳ **${Math.floor(left / 60000)} minutes, ${Math.floor((left % 60000)/1000)} seconds**`);
-        }
-        
-        const target = message.mentions.users.first();
-        if (!target) return message.reply('لتنفيذ الامر يرجي كتابة\nنهب @منشن');
-        if (target.id === message.author.id) return message.reply('هتسرق نفسك؟!');
-        
-        let targetData = await User.findOne({ userId: target.id });
-        if (!targetData || targetData.balance < 3000) return message.reply('الشخص ده معهوش فلوس تتسرق!');
-        
-        const stolen = Math.floor(Math.random() * (30000 - 1000 + 1)) + 1000;
-        const actual = Math.min(targetData.balance, stolen);
-        
-        userData.balance += actual; targetData.balance -= actual;
-        userData.cooldowns = { ...userData.cooldowns, rob: now };
-        userData.markModified('cooldowns'); 
-        await userData.save(); await targetData.save();
-        return message.reply(`تم نهب **${formatNumber(actual)}$** من ${target} 🥷`);
-    }
-
-    // ==========================================
-    // الاستثمار والتداول
+    // 10. الألعاب السريعة (تداول، صاروخ، روليت، الخ)
     // ==========================================
     if (command === 'استثمار' || command === 'تداول') {
-        const cd = 3 * 60 * 1000; // 3 دقايق
-        const lastInv = userData.cooldowns?.[command] || 0;
-        if (now - lastInv < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastInv)) / 60000)}** دقيقة ⏳`);
+        if (await checkCooldown(command, 3)) return; // 3 دقايق
         
         let amount;
         if (args[1] === 'نص') amount = Math.floor(userData.balance / 2);
         else if (args[1] === 'كامل') amount = userData.balance;
         else amount = parseAmount(args[1]);
 
-        if (!amount || amount <= 0) return message.reply(`لتنفيذ الامر يرجي كتابة\n${command} (المبلغ/نص/كامل)`);
+        if (!amount || amount <= 0) return sendEmbed(message, `لتنفيذ الامر يرجي كتابة\n${command} (المبلغ/نص/كامل)`, '#e74c3c');
         if (amount > 100000000) amount = 100000000; // الحد الأقصى 100m
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
-
-        userData.cooldowns = { ...userData.cooldowns, [command]: now };
-        userData.markModified('cooldowns');
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
 
         const isWin = Math.random() < 0.5; // نسبة 50%
         if (isWin) {
@@ -341,34 +454,48 @@ client.on('messageCreate', async message => {
             const p = winPercents[Math.floor(Math.random() * winPercents.length)];
             const profit = Math.floor(amount * (p / 100));
             userData.balance += profit; await userData.save();
-            return message.reply(`مبروك 👏😃 ${command}ك نجح بنسبة ${p}%\nمبلغ الارباح ${formatNumber(profit)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `مبروك 👏😃 ${command}ك نجح بنسبة ${p}%\n\nمبلغ الارباح ${formatNumber(profit)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`, '#2ecc71');
         } else {
             const losePercents = [2, 10, 25, 50];
             const p = losePercents[Math.floor(Math.random() * losePercents.length)];
             const loss = Math.floor(amount * (p / 100));
             userData.balance -= loss; await userData.save();
-            return message.reply(`${command}ك فشل يلا شد 😂\nمبلغ الخساره ${formatNumber(loss)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `${command}ك فشل يلا شد 😂\n\nمبلغ الخساره ${formatNumber(loss)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`, '#e74c3c');
         }
     }
 
-    // ==========================================
-    // روليت وسلوت
-    // ==========================================
-    if (command === 'روليت') {
-        const cd = 7 * 60 * 1000; // 7 دقايق
-        const lastRl = userData.cooldowns?.roulette || 0;
-        if (now - lastRl < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastRl)) / 60000)}** دقيقة ⏳`);
+    if (command === 'صاروخ' || command === 'طاولة') {
+        const isRocket = command === 'صاروخ';
+        if (await checkCooldown(command, isRocket ? 4 : 3)) return; // 4 صاروخ، 3 طاولة
+        
+        const amount = parseAmount(args[1]);
+        if (!amount) return sendEmbed(message, `لتنفيذ الامر يرجي كتابة\n${command} (المبلغ)`, '#e74c3c');
+        if (userData.balance < amount * 2) return sendEmbed(message, 'رصيدك لازم يغطي الخسارة المضاعفة!', '#e74c3c');
 
+        const winChance = isRocket ? 0.80 : 0.50; // صاروخ 80% وطاولة 50%
+        const isWin = Math.random() < winChance;
+        const countries = ['مصر', 'السعودية', 'الإمارات', 'قطر', 'المغرب', 'إيطاليا', 'ألمانيا'];
+        const country = countries[Math.floor(Math.random() * countries.length)];
+
+        if (isWin) {
+            userData.balance += amount * 2; await userData.save();
+            return sendEmbed(message, `مبروك ! ${command} ناجح 🥳\nتم الارسال الي : ${country}\n\nالمكسب : ${formatNumber(amount * 2)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`, '#2ecc71');
+        } else {
+            userData.balance -= amount * 2; await userData.save();
+            return sendEmbed(message, `ابلععععععع ${command} فاشل 😂\nتم الارسال الي : ${country}\n\nالخساره : ${formatNumber(amount * 2)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`, '#e74c3c');
+        }
+    }
+
+    if (command === 'روليت') {
+        if (await checkCooldown('roulette', 7)) return; // 7 دقايق
+        
         const target = message.mentions.users.first();
         const amount = parseAmount(args[2]);
-        if (!target || !amount) return message.reply('لتنفيذ الامر يرجي كتابة\nروليت @منشن (المبلغ)');
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
+        if (!target || !amount) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nروليت @منشن (المبلغ)', '#e74c3c');
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
         
         let targetData = await User.findOne({ userId: target.id });
-        if (!targetData || targetData.balance < amount) return message.reply('رصيد الخصم غير كافي!');
-
-        userData.cooldowns = { ...userData.cooldowns, roulette: now };
-        userData.markModified('cooldowns');
+        if (!targetData || targetData.balance < amount) return sendEmbed(message, 'رصيد الخصم غير كافي!', '#e74c3c');
 
         const winnerIsAuthor = Math.random() < 0.5;
         if (winnerIsAuthor) {
@@ -380,21 +507,16 @@ client.on('messageCreate', async message => {
         
         const winner = winnerIsAuthor ? message.author : target;
         const winnerData = winnerIsAuthor ? userData : targetData;
-        return message.reply(`لقد فاز ${winner}\nرصيدك الحالي ${formatNumber(winnerData.balance)}$`);
+        return sendEmbed(message, `لقد فاز ${winner} 🎲\n\nرصيدك الحالي ${formatNumber(winnerData.balance)}$`, '#2ecc71');
     }
 
     if (command === 'سلوت') {
-        const cd = 8 * 60 * 1000; // 8 دقايق
-        const lastSl = userData.cooldowns?.slot || 0;
-        if (now - lastSl < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastSl)) / 60000)}** دقيقة ⏳`);
-
+        if (await checkCooldown('slot', 8)) return; // 8 دقايق
+        
         let amount = parseAmount(args[1]);
-        if (!amount) return message.reply('لتنفيذ الامر يرجي كتابة\nسلوت (المبلغ)');
+        if (!amount) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nسلوت (المبلغ)', '#e74c3c');
         if (amount > 50000000) amount = 50000000; // الحد الأقصى 50m
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
-
-        userData.cooldowns = { ...userData.cooldowns, slot: now };
-        userData.markModified('cooldowns');
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
 
         const rand = Math.random();
         let emojis = ['🍒', '🍋', '🍉', '⭐', '💎'];
@@ -404,7 +526,7 @@ client.on('messageCreate', async message => {
             s1 = s2 = s3 = emojis[Math.floor(Math.random() * emojis.length)];
             profit = amount * 3;
             userData.balance += profit; await userData.save();
-            return message.reply(`**[ ${s1} | ${s2} | ${s3} ]**\nمبروك لقد ربحت !\nالمكسب : ${formatNumber(profit)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `**[ ${s1} | ${s2} | ${s3} ]**\n\nمبروك لقد ربحت !\nالمكسب : ${formatNumber(profit)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`, '#2ecc71');
         } else if (rand < 0.50) { // 30% (الضعف)
             s1 = emojis[Math.floor(Math.random() * emojis.length)];
             s2 = s1;
@@ -412,66 +534,27 @@ client.on('messageCreate', async message => {
             if (s1 === s3) s3 = emojis.find(e => e !== s1); // عشان ميكونوش 3 متشابهين
             profit = amount * 2;
             userData.balance += profit; await userData.save();
-            return message.reply(`**[ ${s1} | ${s2} | ${s3} ]**\nمبروك لقد ربحت !\nالمكسب : ${formatNumber(profit)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `**[ ${s1} | ${s2} | ${s3} ]**\n\nمبروك لقد ربحت !\nالمكسب : ${formatNumber(profit)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`, '#2ecc71');
         } else { // 50% خسارة
             s1 = emojis[0]; s2 = emojis[1]; s3 = emojis[2]; 
             userData.balance -= amount; await userData.save();
-            return message.reply(`**[ ${s1} | ${s2} | ${s3} ]**\nابلععععع خسرت 😂\nرصيدك الحالي : ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `**[ ${s1} | ${s2} | ${s3} ]**\n\nابلععععع خسرت 😂\nرصيدك الحالي : ${formatNumber(userData.balance)}$`, '#e74c3c');
         }
     }
 
-    // ==========================================
-    // صاروخ وطاولة
-    // ==========================================
-    if (command === 'صاروخ' || command === 'طاولة') {
-        const isRocket = command === 'صاروخ';
-        const cd = (isRocket ? 4 : 3) * 60 * 1000;
-        const lastCmd = userData.cooldowns?.[command] || 0;
-        if (now - lastCmd < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastCmd)) / 60000)}** دقيقة ⏳`);
-
-        const amount = parseAmount(args[1]);
-        if (!amount) return message.reply(`لتنفيذ الامر يرجي كتابة\n${command} (المبلغ)`);
-        if (userData.balance < amount * 2) return message.reply('رصيدك لازم يغطي الخسارة المضاعفة!');
-
-        userData.cooldowns = { ...userData.cooldowns, [command]: now };
-        userData.markModified('cooldowns');
-
-        const winChance = isRocket ? 0.80 : 0.50; // صاروخ 80% وطاولة 50%
-        const isWin = Math.random() < winChance;
-        const countries = ['مصر', 'السعودية', 'الإمارات', 'قطر', 'المغرب', 'إيطاليا', 'ألمانيا'];
-        const country = countries[Math.floor(Math.random() * countries.length)];
-
-        if (isWin) {
-            userData.balance += amount * 2; await userData.save();
-            return message.reply(`مبروك ! ${command} ناجح 🥳\nتم الارسال الي : ${country}\nالمكسب : ${formatNumber(amount * 2)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`);
-        } else {
-            userData.balance -= amount * 2; await userData.save();
-            return message.reply(`ابلععععععع ${command} فاشل 😂\nتم الارسال الي : ${country}\nالخساره : ${formatNumber(amount * 2)}$\nرصيدك الحالي : ${formatNumber(userData.balance)}$`);
-        }
-    }
-
-    // ==========================================
-    // مخاطرة وسوبر مخاطرة
-    // ==========================================
     if (command === 'مخاطرة' || command === 'سوبر') {
         const isSuper = command === 'سوبر' && args[1] === 'مخاطرة';
         const cmdName = isSuper ? 'سوبر مخاطرة' : 'مخاطرة';
         const type = isSuper ? args[2] : args[1];
         
-        if (type !== 'نص' && type !== 'كامل') return message.reply(`لتنفيذ الامر يرجي كتابة\n${cmdName} (نص/كامل)`);
+        if (type !== 'نص' && type !== 'كامل') return sendEmbed(message, `لتنفيذ الامر يرجي كتابة\n${cmdName} (نص/كامل)`, '#e74c3c');
         
-        const cd = (isSuper ? 30 : 8) * 60 * 1000;
-        const lastRisk = userData.cooldowns?.[cmdName] || 0;
-        if (now - lastRisk < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastRisk)) / 60000)}** دقيقة ⏳`);
-
+        if (await checkCooldown(cmdName, isSuper ? 30 : 8)) return; // 30 للسوبر، 8 للمخاطرة العادية
+        
         const amount = type === 'نص' ? Math.floor(userData.balance / 2) : userData.balance;
-        if (amount <= 0) return message.reply('رصيدك صفر!');
+        if (amount <= 0) return sendEmbed(message, 'رصيدك صفر!', '#e74c3c');
 
-        userData.cooldowns = { ...userData.cooldowns, [cmdName]: now };
-        userData.markModified('cooldowns');
-
-        const isWin = Math.random() < 0.5;
-
+        const isWin = Math.random() < 0.5; // نسبة 50%
         if (isWin) {
             const r = Math.random();
             let multi = 1; // 100%
@@ -483,7 +566,7 @@ client.on('messageCreate', async message => {
 
             const profit = Math.floor(amount * multi);
             userData.balance += profit; await userData.save();
-            return message.reply(`مبروك 👏😃 ${cmdName} ناجح بنسبة ${multi * 100}%\nمبلغ الارباح ${formatNumber(profit)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `مبروك 👏😃 ${cmdName} ناجح بنسبة ${multi * 100}%\n\nمبلغ الارباح ${formatNumber(profit)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`, '#2ecc71');
         } else {
             const r = Math.random();
             let lossMulti = 0.5; // 50%
@@ -507,411 +590,365 @@ client.on('messageCreate', async message => {
             }
 
             await userData.save();
-            return message.reply(`${cmdName} فشل يلا شد 😂\nمبلغ الخساره ${formatNumber(loss)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`);
+            return sendEmbed(message, `${cmdName} فشل يلا شد 😂\n\nمبلغ الخساره ${formatNumber(loss)}$\nرصيدك الحالي ${formatNumber(userData.balance)}$`, '#e74c3c');
         }
     }
     // ==========================================
-    // لعبة (حجرة ورقة مقص ضد البوت)
+    // 11. لعبة حجرة ورقة مقص ولعبة الزر
     // ==========================================
     if (command === 'لعبه' || command === 'لعبة') {
-        const cd = 1 * 60 * 1000; // دقيقة
-        const lastGame = userData.cooldowns?.game || 0;
-        if (now - lastGame < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastGame)) / 1000)}** ثانية ⏳`);
-
-        userData.cooldowns = { ...userData.cooldowns, game: now };
-        userData.markModified('cooldowns'); await userData.save();
-
+        if (await checkCooldown('game', 1)) return; // دقيقة
         const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('rps_rock').setLabel('🪨 حجرة').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('rps_paper').setLabel('📄 ورقة').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId('rps_scissors').setLabel('✂️ مقص').setStyle(ButtonStyle.Primary)
+            new ButtonBuilder().setCustomId('g_rock').setEmoji('🪨').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('g_paper').setEmoji('📄').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('g_scissors').setEmoji('✂️').setStyle(ButtonStyle.Primary)
         );
-
-        const msg = await message.reply({ content: 'اختار بسرعة وحاول تغلبني!', components: [row] });
-        const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 15000, max: 1 });
-
+        let msgObj = await message.reply({ embeds: [new EmbedBuilder().setDescription('اختار بسرعة وحاول تغلبني!').setColor('#3498db')], components: [row] });
+        const col = msgObj.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 15000, max: 1 });
         col.on('collect', async i => {
-            const isWin = Math.random() < 0.60; // نسبة فوز 60%
-            if (isWin) {
-                const winAmount = Math.floor(Math.random() * (100000 - 50000 + 1)) + 50000;
+            if (Math.random() < 0.60) {
+                let winAmount = Math.floor(Math.random() * (100000 - 50000 + 1)) + 50000;
                 userData.balance += winAmount; await userData.save();
-                return i.update({ content: `🎉 كسبتني! الجايزة بتاعتك **${formatNumber(winAmount)}$**`, components: [] });
+                return i.update({ embeds: [new EmbedBuilder().setDescription(`🎉 كسبتني! الجايزة بتاعتك **${formatNumber(winAmount)}$**`).setColor('#2ecc71')], components: [] });
             } else {
-                return i.update({ content: `😂 اتعادلنا أو خسرت! مفيش فلوس المرة دي، حاول تاني.`, components: [] });
+                return i.update({ embeds: [new EmbedBuilder().setDescription(`😂 اتعادلنا أو خسرت! مفيش فلوس المرة دي، حاول تاني.`).setColor('#e74c3c')], components: [] });
             }
         });
     }
 
-    // ==========================================
-    // لعبة الزر (التحدي السريع)
-    // ==========================================
     if (command === 'زر') {
-        const cd = 2.5 * 60 * 1000; // دقيقتين ونص
-        const lastZrr = userData.cooldowns?.zrr || 0;
-        if (now - lastZrr < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastZrr)) / 60000)}** دقيقة ⏳`);
-
         const target = message.mentions.users.first();
         let amount = parseAmount(args[2]);
-        if (!target || !amount) return message.reply('لتنفيذ الامر يرجي كتابة\nزر @منشن (المبلغ)');
-        if (amount > 80000000) amount = 80000000; // الحد الأقصى 80m
-
+        if (!target || !amount) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nزر @منشن (المبلغ)', '#e74c3c');
+        if (amount > 80000000) amount = 80000000; // 80m
         let targetData = await User.findOne({ userId: target.id });
-        if (userData.balance < amount || !targetData || targetData.balance < amount) return message.reply('رصيد أحد الطرفين لا يكفي!');
-
-        userData.cooldowns = { ...userData.cooldowns, zrr: now };
-        userData.markModified('cooldowns'); await userData.save();
+        if (userData.balance < amount || !targetData || targetData.balance < amount) return sendEmbed(message, 'رصيد أحد الطرفين لا يكفي!', '#e74c3c');
+        if (await checkCooldown('zrr', 2.5)) return;
 
         const acceptRow = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('zrr_acc').setLabel('موافقة').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('zrr_rej').setLabel('رفض').setStyle(ButtonStyle.Danger)
+            new ButtonBuilder().setCustomId('z_acc').setLabel('موافقة').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('z_rej').setLabel('رفض').setStyle(ButtonStyle.Danger)
         );
-
-        const embed = new EmbedBuilder().setDescription(`هل تقبل تحدي الزر ضد ${message.author} بمبلغ **${formatNumber(amount)}$**؟`);
-        const invMsg = await message.reply({ content: `${target}`, embeds: [embed], components: [acceptRow] });
-
+        let invMsg = await message.reply({ content: `${target}`, embeds: [new EmbedBuilder().setDescription(`هل تقبل تحدي الزر ضد ${message.author} بمبلغ **${formatNumber(amount)}$**؟`).setColor('#f1c40f')], components: [acceptRow] });
         const invCol = invMsg.createMessageComponentCollector({ filter: i => i.user.id === target.id, time: 15000, max: 1 });
-
+        
         invCol.on('collect', async i => {
-            if (i.customId === 'zrr_rej') return i.update({ content: 'تم رفض التحدي.', embeds: [], components: [] });
-            
-            await i.update({ content: 'التحدي هيبدأ! ركزوا...', embeds: [], components: [] });
+            if (i.customId === 'z_rej') return i.update({ embeds: [new EmbedBuilder().setDescription('تم رفض التحدي.').setColor('#e74c3c')], components: [] });
+            await i.update({ embeds: [new EmbedBuilder().setDescription('التحدي هيبدأ! ركزوا...').setColor('#3498db')], components: [] });
             
             setTimeout(async () => {
-                const gameEmbed = new EmbedBuilder().setDescription(`أول من يضغط علي الزر سوف يربح **${formatNumber(amount)}$** 🚀`);
-                const gameRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('zrr_click').setLabel('اضغط هنا!').setStyle(ButtonStyle.Success));
-                
-                await invMsg.edit({ content: `${message.author} ${target}`, embeds: [gameEmbed], components: [gameRow] });
-                
+                await invMsg.edit({ content: `${message.author} ${target}`, embeds: [new EmbedBuilder().setDescription(`أول من يضغط علي الزر سوف يربح **${formatNumber(amount)}$** 🚀`).setColor('#9b59b6')], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('z_clk').setLabel('اضغط هنا!').setStyle(ButtonStyle.Success))] });
                 const gameCol = invMsg.createMessageComponentCollector({ filter: btn => [message.author.id, target.id].includes(btn.user.id), time: 15000, max: 1 });
-                
                 gameCol.on('collect', async btn => {
-                    const winnerId = btn.user.id;
-                    const loserId = winnerId === message.author.id ? target.id : message.author.id;
-                    
-                    let wData = await User.findOne({ userId: winnerId });
-                    let lData = await User.findOne({ userId: loserId });
-                    
-                    wData.balance += amount; lData.balance -= amount;
-                    await wData.save(); await lData.save();
-                    
-                    return btn.update({ content: `🎉 الفائز هو <@${winnerId}> كسب **${formatNumber(amount)}$** واللي اتأخر خسرهم!`, embeds: [], components: [] });
+                    let winnerId = btn.user.id; let loserId = winnerId === message.author.id ? target.id : message.author.id;
+                    let wData = await User.findOne({ userId: winnerId }); let lData = await User.findOne({ userId: loserId });
+                    wData.balance += amount; lData.balance -= amount; await wData.save(); await lData.save();
+                    return btn.update({ content: '', embeds: [new EmbedBuilder().setDescription(`🎉 الفائز هو <@${winnerId}> كسب **${formatNumber(amount)}$** واللي اتأخر خسرهم!`).setColor('#2ecc71')], components: [] });
                 });
-                gameCol.on('end', collected => { if(collected.size === 0) invMsg.edit({ content: 'انتهى الوقت ومحدش داس!', embeds: [], components: [] }); });
             }, 5000);
         });
-        invCol.on('end', collected => { if(collected.size === 0) invMsg.edit({ content: 'تم إلغاء الطلب لعدم الرد.', embeds: [], components: [] }); });
     }
 
     // ==========================================
-    // ماين (20 زرار / 3 قنابل)
+    // 12. لعبة ماينز (بالمضاعفات وكشف القنابل)
     // ==========================================
     if (command === 'ماين') {
-        const cd = 4 * 60 * 1000;
-        const lastMine = userData.cooldowns?.mine || 0;
-        if (now - lastMine < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastMine)) / 60000)}** دقيقة ⏳`);
-
         let amount = parseAmount(args[1]);
-        if (!amount || amount <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nماين (المبلغ)');
-        if (amount > 500000000) amount = 500000000; // حد أقصى 500m
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
+        if (!amount || amount <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nماين (المبلغ)', '#e74c3c');
+        if (amount > 500000000) amount = 500000000;
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
+        if (await checkCooldown('mine', 4)) return;
 
-        userData.balance -= amount; 
-        userData.cooldowns = { ...userData.cooldowns, mine: now };
-        userData.markModified('cooldowns'); await userData.save();
-
-        let bombs = []; while(bombs.length < 3) { let r = Math.floor(Math.random() * 20); if(!bombs.includes(r)) bombs.push(r); }
-        let multi = 1; let clicked = [];
+        userData.balance -= amount; await userData.save();
         
-        const getGrid = (dis = false) => {
-            let r = [];
-            for(let i=0; i<4; i++) {
-                let row = new ActionRowBuilder();
-                for(let j=0; j<5; j++) {
-                    let idx = i*5+j; let isClk = clicked.includes(idx);
-                    row.addComponents(new ButtonBuilder().setCustomId(`m_${idx}`).setLabel(isClk ? '💎' : '❓').setStyle(isClk ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(dis || isClk));
+        let bs = []; while (bs.length < 3) { let r = Math.floor(Math.random() * 20); if (!bs.includes(r)) bs.push(r); }
+        let clks = [];
+        
+        const getGrid = (reveal = false, bombIdx = -1) => {
+            let rs = [];
+            for (let i = 0; i < 4; i++) {
+                let rw = new ActionRowBuilder();
+                for (let j = 0; j < 5; j++) {
+                    let idx = i * 5 + j;
+                    let isBomb = bs.includes(idx); let isClicked = clks.includes(idx);
+                    let lbl = reveal ? (isBomb ? '💣' : '💎') : (isClicked ? '💎' : '❓');
+                    let stl = ButtonStyle.Primary; // أزرق افتراضي
+                    if (reveal) {
+                        if (isBomb) stl = (idx === bombIdx) ? ButtonStyle.Danger : ButtonStyle.Secondary;
+                        else stl = ButtonStyle.Success;
+                    } else if (isClicked) stl = ButtonStyle.Success;
+                    rw.addComponents(new ButtonBuilder().setCustomId(`m_${idx}`).setLabel(lbl).setStyle(stl).setDisabled(reveal || isClicked));
                 }
-                r.push(row);
+                rs.push(rw);
             }
-            r.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('mcash').setLabel('جمع الأرباح').setStyle(ButtonStyle.Primary).setDisabled(dis)));
-            return r;
+            rs.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('mcash').setLabel('جمع الأرباح').setStyle(ButtonStyle.Success).setDisabled(reveal || clks.length === 0)));
+            return rs;
         };
 
-        const msg = await message.reply({ content: `**لعبة ماينز** 💣\nالمبلغ: ${formatNumber(amount)}$\nالمضاعف: ${multi}x`, components: getGrid() });
-        const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 60000 });
+        let msgObj = await message.reply({ embeds: [new EmbedBuilder().setDescription(`مجموع القنابل:\n3-4\n\nالارباح:\n0$`).setColor('#2b2d31')], components: getGrid() });
+        const col = msgObj.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 60000 });
         
         col.on('collect', async i => {
-            if (i.customId === 'mcash') { 
-                col.stop(); let won = amount * multi; userData.balance += won; await userData.save(); 
-                return i.update({ content: `انسحبت وكسبت **${formatNumber(won)}$**`, components: getGrid(true) }); 
+            if (i.customId === 'mcash') {
+                col.stop();
+                let won = Math.floor(amount * (clks.length * 1.5));
+                userData.balance += won; await userData.save();
+                return i.update({ embeds: [new EmbedBuilder().setDescription(`انسحبت وكسبت **${formatNumber(won)}$**`).setColor('#2ecc71')], components: getGrid(true) });
             }
             let idx = parseInt(i.customId.split('_')[1]);
-            if (bombs.includes(idx)) { col.stop(); return i.update({ content: `بوممم 💣! دوست على لغم وخسرت كل حاجة!`, components: getGrid(true) }); }
-            
-            clicked.push(idx); multi *= 3; // يتضاعف 3 أضعاف
-            await i.update({ content: `**لعبة ماينز** 💣\nالمضاعف: ${multi}x`, components: getGrid() });
+            if (bs.includes(idx)) {
+                col.stop();
+                return i.update({ embeds: [new EmbedBuilder().setDescription(`بوممم 💣! دوست على لغم وخسرت فلوسك!`).setColor('#e74c3c')], components: getGrid(true, idx) });
+            }
+            clks.push(idx);
+            let won = Math.floor(amount * (clks.length * 1.5));
+            i.update({ embeds: [new EmbedBuilder().setDescription(`مجموع القنابل:\n3-4\n\nالارباح:\n${formatNumber(won)}$`).setColor('#2b2d31')], components: getGrid() });
         });
     }
 
     // ==========================================
-    // لعبة أرقام (20 زرار)
+    // 13. أرقام وضربة جزاء (بكشف المستور)
     // ==========================================
     if (command === 'ارقام') {
-        const cd = 2.5 * 60 * 1000;
-        const lastNums = userData.cooldowns?.nums || 0;
-        if (now - lastNums < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastNums)) / 60000)}** دقيقة ⏳`);
-
         let amount = parseAmount(args[1]);
-        if (!amount || amount <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nارقام (المبلغ)');
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
+        if (!amount || amount <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\ارقام (المبلغ)', '#e74c3c');
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
+        if (await checkCooldown('nums', 2.5)) return;
 
-        userData.balance -= amount;
-        userData.cooldowns = { ...userData.cooldowns, nums: now };
-        userData.markModified('cooldowns'); await userData.save();
+        userData.balance -= amount; await userData.save();
+        let vs = Array(10).fill(0).concat(Array(10).fill(0).map(() => Math.floor(Math.random() * 14) + 2)).sort(() => Math.random() - 0.5);
 
-        let values = [];
-        for(let i=0; i<10; i++) values.push(0); // 10 بيخسروا
-        for(let i=0; i<10; i++) values.push(Math.floor(Math.random() * (15 - 2 + 1)) + 2); // 10 بيكسبوا من 2x لـ 15x
-        values.sort(() => Math.random() - 0.5);
-
-        const getGrid = (dis = false, revealIdx = -1) => {
-            let r = [];
-            for(let i=0; i<4; i++) {
-                let row = new ActionRowBuilder();
-                for(let j=0; j<5; j++) {
-                    let idx = i*5+j;
-                    let label = dis && revealIdx === idx ? `${values[idx]}x` : '❓';
-                    let style = dis && revealIdx === idx ? (values[idx] === 0 ? ButtonStyle.Danger : ButtonStyle.Success) : ButtonStyle.Secondary;
-                    row.addComponents(new ButtonBuilder().setCustomId(`num_${idx}`).setLabel(label).setStyle(style).setDisabled(dis));
+        const getGrid = (reveal = false, clickedIdx = -1) => {
+            let rs = [];
+            for (let i = 0; i < 4; i++) {
+                let rw = new ActionRowBuilder();
+                for (let j = 0; j < 5; j++) {
+                    let idx = i * 5 + j;
+                    let lbl = reveal ? `${vs[idx]}x` : '❓';
+                    let stl = ButtonStyle.Primary;
+                    if (reveal) {
+                        if (vs[idx] === 0) stl = (idx === clickedIdx) ? ButtonStyle.Danger : ButtonStyle.Secondary;
+                        else stl = (idx === clickedIdx) ? ButtonStyle.Success : ButtonStyle.Secondary;
+                    }
+                    rw.addComponents(new ButtonBuilder().setCustomId(`n_${idx}`).setLabel(lbl).setStyle(stl).setDisabled(reveal));
                 }
-                r.push(row);
+                rs.push(rw);
             }
-            return r;
+            return rs;
         };
 
-        const msg = await message.reply({ content: `**لعبة أرقام** 🔢\nاختر مربع وحظك هيحدد المضاعف!`, components: getGrid() });
-        const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 30000, max: 1 });
-        
+        let msgObj = await message.reply({ embeds: [new EmbedBuilder().setDescription(`**لعبة أرقام** 🔢\nاختر مربع وحظك هيحدد المضاعف!`).setColor('#3498db')], components: getGrid() });
+        const col = msgObj.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 30000, max: 1 });
         col.on('collect', async i => {
             let idx = parseInt(i.customId.split('_')[1]);
-            let multi = values[idx];
-            let won = amount * multi;
+            let multi = vs[idx]; let won = amount * multi;
             userData.balance += won; await userData.save();
             let text = multi === 0 ? `للأسف طلعلك 0x وخسرت فلوسك 💔` : `🎉 مبروك طلعلك ${multi}x وكسبت **${formatNumber(won)}$**!`;
-            return i.update({ content: text, components: getGrid(true, idx) });
+            return i.update({ embeds: [new EmbedBuilder().setDescription(text).setColor(multi === 0 ? '#e74c3c' : '#2ecc71')], components: getGrid(true, idx) });
         });
     }
 
-    // ==========================================
-    // ضربة جزاء (15 زرار)
-    // ==========================================
     if (command === 'ضربة' && args[1] === 'جزاء') {
-        const cd = 4 * 60 * 1000;
-        const lastPen = userData.cooldowns?.pen || 0;
-        if (now - lastPen < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastPen)) / 60000)}** دقيقة ⏳`);
-
         const amount = parseAmount(args[2]);
-        if (!amount || amount <= 0) return message.reply('لتنفيذ الامر يرجي كتابة\nضربة جزاء (المبلغ)');
-        if (userData.balance < amount) return message.reply('رصيدك غير كافي!');
+        if (!amount || amount <= 0) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nضربة جزاء (المبلغ)', '#e74c3c');
+        if (userData.balance < amount) return sendEmbed(message, 'رصيدك غير كافي!', '#e74c3c');
+        if (await checkCooldown('pen', 4)) return;
 
-        userData.balance -= amount;
-        userData.cooldowns = { ...userData.cooldowns, pen: now };
-        userData.markModified('cooldowns'); await userData.save();
+        userData.balance -= amount; await userData.save();
+        let bs = []; while (bs.length < 6) { let r = Math.floor(Math.random() * 15); if (!bs.includes(r)) bs.push(r); }
 
-        let bombs = []; while(bombs.length < 6) { let r = Math.floor(Math.random() * 15); if(!bombs.includes(r)) bombs.push(r); }
-        
-        const getGrid = (dis = false, revealIdx = -1) => {
-            let r = [];
-            for(let i=0; i<3; i++) {
-                let row = new ActionRowBuilder();
-                for(let j=0; j<5; j++) {
-                    let idx = i*5+j;
-                    let isBomb = bombs.includes(idx);
-                    let label = dis && revealIdx === idx ? (isBomb ? '❌' : '⚽') : '🥅';
-                    let style = dis && revealIdx === idx ? (isBomb ? ButtonStyle.Danger : ButtonStyle.Success) : ButtonStyle.Primary;
-                    row.addComponents(new ButtonBuilder().setCustomId(`pen_${idx}`).setLabel(label).setStyle(style).setDisabled(dis));
+        const getGrid = (reveal = false, clickedIdx = -1) => {
+            let rs = [];
+            for (let i = 0; i < 3; i++) {
+                let rw = new ActionRowBuilder();
+                for (let j = 0; j < 5; j++) {
+                    let idx = i * 5 + j;
+                    let isBomb = bs.includes(idx);
+                    let lbl = reveal ? (isBomb ? '❌' : '🥅') : '🥅';
+                    if (reveal && idx === clickedIdx && !isBomb) lbl = '⚽';
+                    let stl = ButtonStyle.Primary;
+                    if (reveal) {
+                        if (isBomb) stl = (idx === clickedIdx) ? ButtonStyle.Danger : ButtonStyle.Secondary;
+                        else stl = (idx === clickedIdx) ? ButtonStyle.Success : ButtonStyle.Secondary;
+                    }
+                    rw.addComponents(new ButtonBuilder().setCustomId(`p_${idx}`).setLabel(lbl).setStyle(stl).setDisabled(reveal));
                 }
-                r.push(row);
+                rs.push(rw);
             }
-            return r;
+            return rs;
         };
 
-        const msg = await message.reply({ content: `**ضربة جزاء** ⚽\nشوت في مكان مفهوش الحارس!`, components: getGrid() });
-        const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 20000, max: 1 });
-        
+        let msgObj = await message.reply({ embeds: [new EmbedBuilder().setDescription(`**ضربة جزاء** ⚽\nشوت في مكان مفهوش الحارس!`).setColor('#3498db')], components: getGrid() });
+        const col = msgObj.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 20000, max: 1 });
         col.on('collect', async i => {
             let idx = parseInt(i.customId.split('_')[1]);
-            if (bombs.includes(idx)) {
-                return i.update({ content: `❌ الحارس صدها وخسرت فلوسك!`, components: getGrid(true, idx) });
-            } else {
-                let won = amount * 2; userData.balance += won; await userData.save();
-                return i.update({ content: `⚽ جووووول! كسبت **${formatNumber(won)}$**`, components: getGrid(true, idx) });
-            }
+            if (bs.includes(idx)) return i.update({ embeds: [new EmbedBuilder().setDescription(`❌ الحارس صدها وخسرت فلوسك!`).setColor('#e74c3c')], components: getGrid(true, idx) });
+            let won = amount * 2; userData.balance += won; await userData.save();
+            return i.update({ embeds: [new EmbedBuilder().setDescription(`⚽ جووووول! كسبت **${formatNumber(won)}$**`).setColor('#2ecc71')], components: getGrid(true, idx) });
         });
     }
 
     // ==========================================
-    // اكس او و سباق وابراج وباقي الالعاب
+    // 14. السباق والإكس أو والأبراج وباقي الألعاب
     // ==========================================
+    if (command === 'سباق') {
+        const choice = parseInt(args[1]); const amount = parseAmount(args[2]);
+        if (![1, 2, 3].includes(choice) || !amount) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nسباق (رقم 1-3) (المبلغ)', '#e74c3c');
+        if (userData.balance < amount * 2) return sendEmbed(message, 'رصيد لا يغطي الخسارة المضاعفة!', '#e74c3c');
+        if (await checkCooldown('race', 3)) return;
+
+        let msgObj = await message.reply({ embeds: [new EmbedBuilder().setDescription('#1/----------🚙\n#2/----------🚙\n#3/----------🚙').setColor('#3498db')] });
+        let p = [0, 0, 0]; let win = 0;
+        
+        let int = setInterval(async () => {
+            for (let i = 0; i < 3; i++) p[i] += Math.floor(Math.random() * 4);
+            let t = '';
+            for (let i = 0; i < 3; i++) {
+                if (p[i] >= 10) { win = i + 1; clearInterval(int); }
+                t += `#${i + 1}/${'-'.repeat(10 - Math.min(10, p[i]))}🚙${'-'.repeat(Math.min(10, p[i]))}\n`;
+            }
+            if (win) {
+                let isWin = win === choice;
+                if (isWin) userData.balance += amount * 2; else userData.balance -= amount * 2;
+                await userData.save();
+                return msgObj.edit({ embeds: [new EmbedBuilder().setDescription(`${t}\n\n${isWin ? 'مكسب 🚀' : 'القمم خسرت يالسباق 😂💔'}`).setColor(isWin ? '#2ecc71' : '#e74c3c')] });
+            }
+            msgObj.edit({ embeds: [new EmbedBuilder().setDescription(t).setColor('#3498db')] });
+        }, 1500);
+    }
+
+    if (command === 'ابراج') {
+        const amount = parseAmount(args[1]);
+        if (!amount || userData.balance < amount) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nابراج (المبلغ)', '#e74c3c');
+        if (await checkCooldown('towers', 2.5)) return;
+
+        userData.balance -= amount; await userData.save();
+        let currentMulti = 1; let currentRow = 4;
+        const bs = Array.from({ length: 5 }, () => Math.floor(Math.random() * 3));
+        
+        const getRows = (act) => {
+            let rs = [];
+            for (let i = 0; i < 5; i++) {
+                let rw = new ActionRowBuilder();
+                for (let j = 0; j < 3; j++) rw.addComponents(new ButtonBuilder().setCustomId(`t_${i}_${j}`).setLabel('❓').setStyle(ButtonStyle.Primary).setDisabled(i !== act));
+                rs.push(rw);
+            }
+            rs.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cashout').setLabel('جمع ارباح').setStyle(ButtonStyle.Success)));
+            return rs;
+        };
+
+        let msgObj = await message.reply({ embeds: [new EmbedBuilder().setDescription(`**لعبة الأبراج**\nالمضاعف: x${currentMulti}`).setColor('#3498db')], components: getRows(currentRow) });
+        const col = msgObj.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 60000 });
+        col.on('collect', async i => {
+            if (i.customId === 'cashout') {
+                let won = amount * currentMulti; userData.balance += won; await userData.save();
+                col.stop(); return i.update({ embeds: [new EmbedBuilder().setDescription(`انسحبت وكسبت **${formatNumber(won)}$**`).setColor('#2ecc71')], components: [] });
+            }
+            const [_, rowIdx, colIdx] = i.customId.split('_');
+            if (parseInt(colIdx) === bs[parseInt(rowIdx)]) {
+                col.stop(); return i.update({ embeds: [new EmbedBuilder().setDescription(`بومممم 💣! خسرت فلوسك`).setColor('#e74c3c')], components: [] });
+            }
+            currentRow--; currentMulti *= 2;
+            if (currentRow < 0) {
+                let won = amount * currentMulti; userData.balance += won; await userData.save();
+                col.stop(); return i.update({ embeds: [new EmbedBuilder().setDescription(`كسبت الأبراج كلها! 🎉 الأرباح: **${formatNumber(won)}$**`).setColor('#2ecc71')], components: [] });
+            }
+            await i.update({ embeds: [new EmbedBuilder().setDescription(`**لعبة الأبراج**\nالمضاعف: x${currentMulti}`).setColor('#3498db')], components: getRows(currentRow) });
+        });
+    }
+
     if (command === 'اكس-او' || command === 'اكس') {
-        const cd = 2 * 60 * 1000;
-        const lastXo = userData.cooldowns?.xo || 0;
-        if (now - lastXo < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastXo)) / 60000)}** دقيقة ⏳`);
-
         const target = message.mentions.users.first();
-        let amount = parseAmount(args[2] || args[1]); 
-        if (!target || !amount) return message.reply('لتنفيذ الامر يرجي كتابة\nاكس او @منشن (المبلغ)');
-        if (amount > 100000000) amount = 100000000;
-
+        let amount = parseAmount(args[2] || args[1]);
+        if (!target || !amount) return sendEmbed(message, 'لتنفيذ الامر يرجي كتابة\nاكس او @منشن (المبلغ)', '#e74c3c');
         let targetData = await User.findOne({ userId: target.id });
-        if (userData.balance < amount || !targetData || targetData.balance < amount) return message.reply('رصيد أحد الطرفين لا يكفي!');
+        if (userData.balance < amount || !targetData || targetData.balance < amount) return sendEmbed(message, 'رصيد أحد الطرفين لا يكفي!', '#e74c3c');
+        if (await checkCooldown('xo', 2)) return;
 
-        userData.cooldowns = { ...userData.cooldowns, xo: now };
-        userData.markModified('cooldowns'); await userData.save();
-
-        const invMsg = await message.reply({ content: `${target} تقبل التحدي بـ ${formatNumber(amount)}$؟`, components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('xo_acc').setLabel('موافقة').setStyle(ButtonStyle.Success))] });
+        let invMsg = await message.reply({ content: `${target}`, embeds: [new EmbedBuilder().setDescription(`تقبل التحدي بـ ${formatNumber(amount)}$؟`).setColor('#f1c40f')], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('x_acc').setLabel('موافقة').setStyle(ButtonStyle.Success))] });
         const invCol = invMsg.createMessageComponentCollector({ filter: i => i.user.id === target.id, time: 15000, max: 1 });
         
         invCol.on('collect', async i => {
             userData.balance -= amount; targetData.balance -= amount; await userData.save(); await targetData.save();
-            let board = [0,1,2,3,4,5,6,7,8]; let turn = message.author.id;
+            let board = [0, 1, 2, 3, 4, 5, 6, 7, 8]; let turn = message.author.id;
             
-            const getRows = () => {
-                let r = [];
-                for(let row=0; row<3; row++) {
-                    let aw = new ActionRowBuilder();
-                    for(let col=0; col<3; col++) {
-                        let v = board[row*3+col]; let isN = isNaN(v);
-                        aw.addComponents(new ButtonBuilder().setCustomId(`x_${row*3+col}`).setLabel(isN ? '-' : v).setStyle(v==='X'?ButtonStyle.Danger:(v==='O'?ButtonStyle.Primary:ButtonStyle.Secondary)).setDisabled(!isN));
+            const getRws = () => {
+                let rs = [];
+                for (let r = 0; r < 3; r++) {
+                    let rw = new ActionRowBuilder();
+                    for (let c = 0; c < 3; c++) {
+                        let v = board[r * 3 + c]; let isN = isNaN(v);
+                        rw.addComponents(new ButtonBuilder().setCustomId(`x_${r * 3 + c}`).setLabel(isN ? '-' : v).setStyle(v === 'X' ? ButtonStyle.Danger : (v === 'O' ? ButtonStyle.Primary : ButtonStyle.Secondary)).setDisabled(!isN));
                     }
-                    r.push(aw);
+                    rs.push(rw);
                 }
-                return r;
+                return rs;
             };
             
-            await i.update({ content: `بدأ التحدي! دور <@${turn}>`, components: getRows() });
+            await i.update({ content: '', embeds: [new EmbedBuilder().setDescription(`بدأ التحدي! دور <@${turn}>`).setColor('#3498db')], components: getRws() });
             const gCol = invMsg.createMessageComponentCollector({ filter: btn => [message.author.id, target.id].includes(btn.user.id), time: 60000 });
             gCol.on('collect', async btn => {
                 if (btn.user.id !== turn) return btn.reply({ content: 'مش دورك!', ephemeral: true });
                 board[parseInt(btn.customId.split('_')[1])] = turn === message.author.id ? 'X' : 'O';
-                const w = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]].find(w => board[w[0]]===board[w[1]] && board[w[1]]===board[w[2]] && isNaN(board[w[0]]));
-                if (w) { gCol.stop(); let wd = await User.findOne({ userId: turn }); wd.balance += amount * 2; await wd.save(); return btn.update({ content: `🎉 مبروك <@${turn}> كسبت ${formatNumber(amount*2)}$!`, components: getRows() }); }
-                if (board.every(x => isNaN(x))) { gCol.stop(); return btn.update({ content: `تعادل! راحت الفلوس عليكم انتوا الاتنين 😂`, components: getRows() }); }
+                const w = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]].find(w => board[w[0]] === board[w[1]] && board[w[1]] === board[w[2]] && isNaN(board[w[0]]));
+                if (w) { gCol.stop(); let wd = await User.findOne({ userId: turn }); wd.balance += amount * 2; await wd.save(); return btn.update({ embeds: [new EmbedBuilder().setDescription(`🎉 مبروك <@${turn}> كسبت ${formatNumber(amount * 2)}$!`).setColor('#2ecc71')], components: getRws() }); }
+                if (board.every(x => isNaN(x))) { gCol.stop(); return btn.update({ embeds: [new EmbedBuilder().setDescription(`تعادل! راحت الفلوس عليكم انتوا الاتنين 😂`).setColor('#f1c40f')], components: getRws() }); }
                 turn = turn === message.author.id ? target.id : message.author.id;
-                await btn.update({ content: `دور <@${turn}>`, components: getRows() });
+                await btn.update({ embeds: [new EmbedBuilder().setDescription(`دور <@${turn}>`).setColor('#3498db')], components: getRws() });
             });
         });
     }
 
-    if (command === 'سباق') {
-        const cd = 3 * 60 * 1000;
-        const lastRace = userData.cooldowns?.race || 0;
-        if (now - lastRace < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastRace)) / 60000)}** دقيقة ⏳`);
-
-        const choice = parseInt(args[1]); let amount = parseAmount(args[2]);
-        if (![1,2,3].includes(choice) || !amount) return message.reply('لتنفيذ الامر يرجي كتابة\nسباق (رقم 1-3) (المبلغ)');
-        if (amount > 100000000) amount = 100000000;
-        if (userData.balance < amount * 2) return message.reply('رصيد لا يغطي الخسارة المضاعفة!');
-
-        userData.cooldowns = { ...userData.cooldowns, race: now };
-        userData.markModified('cooldowns');
-
-        const winner = Math.floor(Math.random() * 3) + 1;
-        let cars = ['#1/----------🚙', '#2/----------🚙', '#3/----------🚙']; cars[winner - 1] = `#${winner}/🚙----------`; 
-        const embed = new EmbedBuilder().setDescription(`${cars.join('\n')}\n\n${choice === winner ? 'مكسب 🚀' : 'القمم خسرت يالسباق 😂💔'}`);
-        if (choice === winner) userData.balance += amount * 2; else userData.balance -= amount * 2;
-        await userData.save(); return message.reply({ embeds: [embed] });
-    }
-
-    if (command === 'ابراج') {
-        const cd = 2.5 * 60 * 1000;
-        const lastTow = userData.cooldowns?.towers || 0;
-        if (now - lastTow < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastTow)) / 60000)}** دقيقة ⏳`);
-
-        const amount = parseAmount(args[1]); if (!amount || userData.balance < amount) return message.reply('لتنفيذ الامر يرجي كتابة\nابراج (المبلغ)');
-        
-        userData.balance -= amount;
-        userData.cooldowns = { ...userData.cooldowns, towers: now };
-        userData.markModified('cooldowns'); await userData.save();
-        
-        let currentMulti = 1; let currentRow = 4;
-        const bombs = Array.from({length: 5}, () => Math.floor(Math.random() * 3)); 
-        const getRows = (act) => {
-            let r = [];
-            for (let i = 0; i < 5; i++) {
-                let row = new ActionRowBuilder();
-                for (let j = 0; j < 3; j++) row.addComponents(new ButtonBuilder().setCustomId(`t_${i}_${j}`).setLabel('❓').setStyle(ButtonStyle.Primary).setDisabled(i !== act));
-                r.push(row);
-            }
-            r.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cashout').setLabel('جمع ارباح').setStyle(ButtonStyle.Success)));
-            return r;
-        };
-        
-        const msg = await message.reply({ content: `**لعبة الأبراج**\nالمضاعف: x${currentMulti}`, components: getRows(currentRow) });
-        const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 60000 });
-        col.on('collect', async i => {
-            if (i.customId === 'cashout') { const won = amount * currentMulti; userData.balance += won; await userData.save(); col.stop(); return i.update({ content: `انسحبت وكسبت **${formatNumber(won)}$**`, components: [] }); }
-            const [_, rowIdx, colIdx] = i.customId.split('_');
-            if (parseInt(colIdx) === bombs[parseInt(rowIdx)]) { col.stop(); return i.update({ content: `بومممم 💣! خسرت فلوسك`, components: [] }); }
-            currentRow--; currentMulti *= 2; // ضعف المبلغ في كل صف ينجح فيه
-            if (currentRow < 0) { const won = amount * currentMulti; userData.balance += won; await userData.save(); col.stop(); return i.update({ content: `كسبت الأبراج كلها! 🎉 الأرباح: **${formatNumber(won)}$**`, components: [] }); }
-            await i.update({ content: `**لعبة الأبراج**\nالمضاعف: x${currentMulti}`, components: getRows(currentRow) });
-        });
-    }
-
     if (command === 'ذاكرة' || command === 'ايموجي' || command === 'كنز') {
-        const cd = (command === 'ذاكرة' ? 5 : 3) * 60 * 1000;
-        const lastMn = userData.cooldowns?.[command] || 0;
-        if (now - lastMn < cd) return message.reply(`انتظر **${Math.ceil((cd - (now - lastMn)) / 60000)}** دقيقة ⏳`);
-
-        const amount = parseAmount(args[1]); if (!amount || userData.balance < amount) return message.reply(`لتنفيذ الامر يرجي كتابة\n${command} (المبلغ)`);
+        const amount = parseAmount(args[1]);
+        if (!amount || userData.balance < amount) return sendEmbed(message, `لتنفيذ الامر يرجي كتابة\n${command} (المبلغ)`, '#e74c3c');
+        if (await checkCooldown(command, command === 'ذاكرة' ? 5 : 3)) return;
         
-        userData.balance -= amount; 
-        userData.cooldowns = { ...userData.cooldowns, [command]: now };
-        userData.markModified('cooldowns'); await userData.save();
+        userData.balance -= amount; await userData.save();
 
         if (command === 'ذاكرة') {
-            const ems = ['🍎', '🍌', '🍉']; const target = ems[Math.floor(Math.random()*3)];
-            const msg = await message.reply(`ركز! الايموجيات دي هتختفي: **🍎 🍌 🍉**`);
+            const ems = ['🍎', '🍌', '🍉']; const tg = ems[Math.floor(Math.random() * 3)];
+            let m = await message.reply({ embeds: [new EmbedBuilder().setDescription(`ركز! الايموجيات دي هتختفي: **🍎 🍌 🍉**`).setColor('#3498db')] });
             setTimeout(async () => {
-                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('em_0').setLabel('🍎').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('em_1').setLabel('🍌').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('em_2').setLabel('🍉').setStyle(ButtonStyle.Secondary));
-                await msg.edit({ content: `فين كان الـ **${target}**؟`, components: [row] });
-                const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 10000, max: 1 });
+                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('e_0').setLabel('🍎').setStyle(2), new ButtonBuilder().setCustomId('e_1').setLabel('🍌').setStyle(2), new ButtonBuilder().setCustomId('e_2').setLabel('🍉').setStyle(2));
+                await m.edit({ embeds: [new EmbedBuilder().setDescription(`فين كان الـ **${tg}**؟`).setColor('#f1c40f')], components: [row] });
+                const col = m.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 10000, max: 1 });
                 col.on('collect', async i => {
-                    if (i.component.label === target) { userData.balance += amount * 2; await userData.save(); i.update({ content: `🎉 صح! كسبت **${formatNumber(amount*2)}$**`, components: []}); } 
-                    else i.update({ content: `❌ غلط! خسرت رهانك.`, components: []});
+                    if (i.component.label === tg) { userData.balance += amount * 2; await userData.save(); i.update({ embeds: [new EmbedBuilder().setDescription(`🎉 صح! كسبت **${formatNumber(amount * 2)}$**`).setColor('#2ecc71')], components: [] }); }
+                    else i.update({ embeds: [new EmbedBuilder().setDescription(`❌ غلط! خسرت رهانك.`).setColor('#e74c3c')], components: [] });
                 });
             }, 3000);
         } else if (command === 'ايموجي') {
-            const target = '👽'; const str = '👻👻👻👻👻👻👻👻👽👻👻👻👻👻';
-            await message.reply(`اكتب الايموجي المختلف هنا بسرعة:\n${str}\nأول واحد هيكسب **${formatNumber(amount*2)}$** (10 ثواني)`);
-            const col = message.channel.createMessageCollector({ filter: m => m.content === target, time: 10000, max: 1 });
-            col.on('collect', async m => { let wd = await User.findOne({ userId: m.author.id }) || await User.create({ userId: m.author.id }); wd.balance += amount * 2; await wd.save(); m.reply(`🎉 بطل يا ${m.author}!`); });
+            await message.reply({ embeds: [new EmbedBuilder().setDescription(`اكتب الايموجي المختلف هنا بسرعة:\n👻👻👻👻👻👻👻👻👽👻👻👻👻👻\nأول واحد هيكسب **${formatNumber(amount * 2)}$** (10 ثواني)`).setColor('#3498db')] });
+            const col = message.channel.createMessageCollector({ filter: m => m.content === '👽', time: 10000, max: 1 });
+            col.on('collect', async m => { let wd = await User.findOne({ userId: m.author.id }); wd.balance += amount * 2; await wd.save(); sendEmbed(m, `🎉 بطل يا ${m.author}!`, '#2ecc71'); });
         } else if (command === 'كنز') {
-            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tr_1').setLabel('📦').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('tr_2').setLabel('📦').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('tr_3').setLabel('📦').setStyle(ButtonStyle.Secondary));
-            const msg = await message.reply({ content: `اختر صندوق الكنز بـ ${formatNumber(amount)}$:`, components: [row] });
-            const col = msg.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 15000, max: 1 });
+            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tr_1').setLabel('📦').setStyle(2), new ButtonBuilder().setCustomId('tr_2').setLabel('📦').setStyle(2), new ButtonBuilder().setCustomId('tr_3').setLabel('📦').setStyle(2));
+            let m = await message.reply({ embeds: [new EmbedBuilder().setDescription(`اختر صندوق الكنز بـ ${formatNumber(amount)}$:`).setColor('#f1c40f')], components: [row] });
+            const col = m.createMessageComponentCollector({ filter: i => i.user.id === message.author.id, time: 15000, max: 1 });
             col.on('collect', async i => {
-                if (Math.random() < 0.33) { userData.balance += amount * 3; await userData.save(); i.update({ content: `🎉 لقيت الكنز! كسبت **${formatNumber(amount*3)}$**`, components: []}); } 
-                else i.update({ content: `❌ الصندوق فاضي! خسرت فلوسك 💔`, components: []});
+                if (Math.random() < 0.33) { userData.balance += amount * 3; await userData.save(); i.update({ embeds: [new EmbedBuilder().setDescription(`🎉 لقيت الكنز! كسبت **${formatNumber(amount * 3)}$**`).setColor('#2ecc71')], components: [] }); }
+                else i.update({ embeds: [new EmbedBuilder().setDescription(`❌ الصندوق فاضي! خسرت فلوسك 💔`).setColor('#e74c3c')], components: [] });
             });
         }
     }
 
     // ==========================================
-    // قائمة الأوامر (Help Menu)
+    // 15. قائمة الأوامر الشاملة (Help)
     // ==========================================
     if (command === 'اوامر' || command === '#اوامر') {
         const row = new ActionRowBuilder().addComponents(
-            new StringSelectMenuBuilder().setCustomId('help_menu').setPlaceholder('اختر قائمة الأوامر').addOptions([
-                { label: 'اوامر الالعاب', value: 'games', emoji: '🎮' }, { label: 'اوامر الادمن', value: 'admin', emoji: '⚙️' }
+            new StringSelectMenuBuilder().setCustomId('help_menu').setPlaceholder('اختر قائمة الأوامر من هنا').addOptions([
+                { label: 'اوامر الالعاب والاقتصاد', value: 'games', emoji: '🎮' },
+                { label: 'اوامر الادمن', value: 'admin', emoji: '⚙️' }
             ])
         );
-        return message.reply({ content: 'القائمة الرئيسية:', components: [row] });
+        return message.reply({ embeds: [new EmbedBuilder().setDescription('**القائمة الرئيسية للأوامر:**\nاضغط على القائمة المنسدلة تحت عشان تشوف الأوامر.').setColor('#2b2d31')], components: [row] });
     }
 });
 
 // ==========================================
-// التفاعلات (القوائم المنسدلة للأسهم والمساعدة)
+// 16. التفاعلات الشاملة (القوائم المنسدلة للأسهم والمساعدة)
 // ==========================================
 client.on('interactionCreate', async interaction => {
     if (interaction.isStringSelectMenu()) {
@@ -927,25 +964,33 @@ client.on('interactionCreate', async interaction => {
         }
         
         if (interaction.customId.startsWith('buy_stock_')) {
-            const count = parseInt(interaction.customId.split('_')[2]); const stockKey = interaction.values[0];
+            const count = parseInt(interaction.customId.split('_')[2]);
+            const stockKey = interaction.values[0];
             const limits = { apple: 300, starbucks: 350, google: 400, microsoft: 450, mcdonalds: 500, tesla: 400 };
-            let uData = await User.findOne({ userId: interaction.user.id }); let bConfig = await BotConfig.findOne({ botId: 'main' });
+            
+            let uData = await User.findOne({ userId: interaction.user.id });
+            let bConfig = await BotConfig.findOne({ botId: 'main' });
             
             const currentOwned = uData.stocks?.[stockKey] || 0;
-            if (currentOwned + count > limits[stockKey]) return interaction.reply({ content: `❌ أقصى حد ${limits[stockKey]} سهم!`, ephemeral: true });
+            if (currentOwned + count > limits[stockKey]) return interaction.reply({ embeds: [new EmbedBuilder().setDescription(`❌ أقصى حد ${limits[stockKey]} سهم!`).setColor('#e74c3c')], ephemeral: true });
+            
             const totalPrice = bConfig.stockPrices[stockKey] * count;
+            if (uData.balance < totalPrice) return interaction.reply({ embeds: [new EmbedBuilder().setDescription(`❌ رصيدك غير كافي! تحتاج **${formatNumber(totalPrice)}$**.`).setColor('#e74c3c')], ephemeral: true });
             
-            if (uData.balance < totalPrice) return interaction.reply({ content: `❌ رصيدك غير كافي! تحتاج **${formatNumber(totalPrice)}$**.`, ephemeral: true });
-            
-            uData.balance -= totalPrice; uData.stocks[stockKey] = currentOwned + count; uData.markModified('stocks'); await uData.save();
-            return interaction.update({ content: `✅ مبروك! تم شراء **${count}** سهم بنجاح.\nالتكلفة: **${formatNumber(totalPrice)}$**`, components: [] });
+            uData.balance -= totalPrice;
+            uData.stocks[stockKey] = currentOwned + count;
+            uData.markModified('stocks'); await uData.save();
+            return interaction.update({ content: '', embeds: [new EmbedBuilder().setDescription(`✅ مبروك! تم شراء **${count}** سهم بنجاح.\nالتكلفة: **${formatNumber(totalPrice)}$**`).setColor('#2ecc71')], components: [] });
         }
     }
 });
 
 // ==========================================
-// تشغيل قاعدة البيانات والبوت
+// 17. تشغيل قاعدة البيانات والبوت
 // ==========================================
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-    .then(() => { console.log('MongoDB Connected Successfully!'); client.login(process.env.TOKEN); })
+    .then(() => { 
+        console.log('MongoDB Connected Successfully!'); 
+        client.login(process.env.TOKEN); 
+    })
     .catch(err => console.log('MongoDB Error:', err));
